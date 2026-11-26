@@ -81,6 +81,68 @@ GET /vulnerabilities/xss_r/?name=test123&Submit=Submit HTTP/1.1
 
 **改参数 → 服务器按新参数返回**，证明完全控制了请求。
 
+## 三·五、复盘四问
+
+### 推理链（为什么这么做）
+
+**第 1 步：为什么先打 `<script>alert(1)</script>`**
+
+- 我在想：弹窗是最小可验证的「代码被执行」证据，比改页面更难被误判。
+- 验证：Submit 后弹窗出现。
+- 所以：输入进入了 HTML 输出，且未编码。
+
+**第 2 步：为什么马上看源码**
+
+- 我在想：要知道是「浏览器 XSS 过滤器被绕过」还是「服务端根本没转义」。
+- 验证：`low.php` 里只有 `echo '<pre>Hello ' . $_GET['name'] . '</pre>';`，还带了 `X-XSS-Protection: 0`。
+- 所以：服务端零转义，浏览器防护也被主动关闭。
+
+**第 3 步：为什么改用 `dvwa.test`**
+
+- 我在想：Burp 抓不到包，先排查「请求有没有经过代理」。
+- 验证：Firefox 明确写着 `127.0.0.1 ... are never proxied`。
+- 所以：把 `127.0.0.1 dvwa.test` 写进 `/etc/hosts`，请求才会走 Burp。
+
+**第 4 步：为什么用 Repeater 改成 `test123`**
+
+- 我在想：要证明「我改什么，服务器就返回什么」，而不是只会打一个固定 payload。
+- 验证：响应变成 `<pre>Hello test123</pre>`。
+- 所以：请求完全可控，注入链路成立。
+
+### 载荷是怎么来的
+
+- **`<script>alert(1)</script>`**：最小可执行脚本，URL 编码后为 `%3Cscript%3E...`。
+- **`test123`**：用来验证参数确实影响输出（对照组）。
+- **为什么用 GET**：模块把 name 放在 URL，反射型典型形态。
+
+### 逐段解释
+
+| 片段 | 作用 |
+|---|---|
+| `?name=<script>...` | 参数进入页面输出 |
+| `echo '<pre>Hello ' . $_GET['name']` | 无转义拼接 |
+| `X-XSS-Protection: 0` | 关闭浏览器自带过滤 |
+| Repeater 改 `name=test123` | 验证输出可控 |
+
+### 失败尝试与坑
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| Burp 中 history 空白 | 访问的是 127.0.0.1，被浏览器排除代理 | 用 `dvwa.test` |
+| `proxy server is refusing connections` | Burp 未监听 / 端口不对 | 监听 8081，勾 Running |
+| 8080 冲突 | DVWA 占了 8080 | Burp 改 8081 |
+
+### 自测
+
+**Q1**：反射型 XSS 的本质是什么？
+**A**：用户输入被原样输出到 HTML，浏览器当代码执行。
+
+**Q2**：为什么 Firefox 不代理 localhost？
+**A**：浏览器硬编码排除本地回环地址，必须用域名绕过。
+
+**Q3**：修复的核心一行代码？
+**A**：`htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8')`。
+
 ## 四、原理
 
 - 反射型 XSS：参数在 URL，服务器原样输出到页面，浏览器执行。

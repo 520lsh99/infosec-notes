@@ -107,6 +107,90 @@ G2 G1
 | `seal is bound to tid ...` | seal 不在目标线程创建 |
 | `callback parameters must be global` | 传了局部引用 |
 
+## 六·五、复盘四问
+
+### 推理链（为什么这么做）
+
+**第 1 步：为什么先看 `classes`**
+
+- 我在想：不知道有哪些 native 方法、签名是什么，就没法调用。
+- 验证：`classes` 列出 `guard (I)I`、`guard ([BILjava/lang/Class;)V`、`unseal (Ljava/lang/Class;)V`，以及 dlsym 导出 `unseal [retired]`。
+- 所以：**只信 RegisterNatives 表**；dlsym 那个是干扰项。
+
+**第 2 步：为什么在主线程 FindClass**
+
+- 我在想：FindClass 与线程绑定，放 worker 上可能拿到不同的类对象。
+- 验证：主线程 `FindClass` → `L1 (identity=0x5eed0001)`；worker 上再 `FindClass` → `L2 (identity=0x5eed0002)`。
+- 所以：**App 类只能在主线程/JNI_OnLoad 路径拿到**（Android 经典坑）。
+
+**第 3 步：为什么立刻 NewGlobalRef**
+
+- 我在想：`L1` 是主线程局部引用，切到 worker 就失效。
+- 验证：直接拿 `L1` 去 worker 调用会报局部引用无效。
+- 所以：`5 → L1 → G1`，全局引用跨线程有效。
+
+**第 4 步：为什么 `unseal` 用 `3` 调不动**
+
+- 我在想：`3` 只能调 RegisterNatives 里的方法。
+- 验证：`3 ... unseal (Ljava/lang/Class;)V` 报 `NoSuchMethodError`。
+- 所以：`unseal` 只能走 `10`，且必须在 worker 上、没有挂起异常。
+
+**第 5 步：为什么 seal 必须在 worker 上生成**
+
+- 我在想：seal 对象记录 `origin_tid`，跨线程使用会校验失败。
+- 验证：主线程生成的 seal 在 worker 上用，报 `seal is bound to tid ...`。
+- 所以：`7` 先 attach，再 `3` 调 `guard ([BILjava/lang/Class;)V` 生成 `L2 (seal)`。
+
+**第 6 步：为什么两个参数都要全局引用**
+
+- 我在想：`10` 的 usage 明确写 `<seal-global-ref> <class-global-ref>`。
+- 验证：传 `G1` 当 seal → `not a seal handle`；传局部引用 → `callback parameters must be global`。
+- 所以：`5 → L2 → G2`，最后 `10 G2 G1`。
+
+**第 7 步：为什么 `8` 不能用**
+
+- 实测：`8 DetachCurrentThread` 之后会话直接断开（`unexpected eof`）。
+- 所以：整个流程避开 `8`。
+
+### 命令/载荷是怎么来的
+
+- **来源**：全部手输菜单命令，无脚本。
+- **签名 `([BILjava/lang/Class;)V` 怎么来的**：从 `classes` 输出抄，**注意包含 `[BI`**（byte 数组 + int + Class），少抄就 `NoSuchMethodError`。
+- **类名**用斜杠：`com/example/native_vault/NativeVault`。
+
+### 逐段解释
+
+| 命令 | 作用 |
+|---|---|
+| `2` + 类名 | 主线程 FindClass，得到局部引用 `L1`（identity 01） |
+| `5` + `L1` | 提升为全局 `G1`，供 worker 使用 |
+| `7` | AttachCurrentThread，切到 native worker |
+| `3` + `guard ([BILjava/lang/Class;)V s:00 i:0 ref:G1` | 在 worker 上生成 seal 局部引用 `L2` |
+| `5` + `L2` | seal 提升为全局 `G2`（kind=seal） |
+| `10` + `G2 G1` | 在 worker 上解封，输出 flag |
+
+### 失败尝试与坑
+
+| 尝试 | 报错 | 原因 |
+|---|---|---|
+| 签名写成 `([Ljava/lang/Class;)V` | `NoSuchMethodError` | 漏了 `[BI`（本机最难发现的一个坑） |
+| 类名用点号 | `ClassNotFoundException` | FindClass 要斜杠 |
+| 用 `L1` 跨线程 | 局部引用无效 | 局部引用绑线程 |
+| 主线程生成 seal 再 worker 用 | `seal is bound to tid` | seal 绑定创建线程 |
+| 执行 `8 DetachCurrentThread` | 会话断开 | 该命令会回收会话 |
+| FindClass 失败后继续操作 | 全部被挡 | 挂起异常未清除，要先 `9` |
+
+### 自测
+
+**Q1**：为什么主线程和 worker 上 FindClass 得到不同 identity？
+**A**：worker 线程走系统 ClassLoader，拿不到 App ClassLoader 加载的类。
+
+**Q2**：`unseal` 为什么不能用 `3` 调？
+**A**：它不在 InvokeNative 的可调表里，只能通过命令 `10` 在 worker 上执行。
+
+**Q3**：seal 为什么必须在 worker 上生成？
+**A**：seal 记录 `origin_tid`，使用时会校验创建线程。
+
 ## 七、修复与启示
 
 这是逆向/安全研究中的「JNI 调试 harness」，真实开发中的对应规则：

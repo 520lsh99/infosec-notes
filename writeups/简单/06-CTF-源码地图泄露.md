@@ -80,6 +80,71 @@ curl -H 'X-Launch-Token: flag{d21d964881ee70f433c79d44ff62178b5}' \
 
 **拿到 flag。**
 
+## 三·五、复盘四问
+
+### 推理链（为什么这么做）
+
+**第 1 步：为什么先读 `index.html` 的注释**
+
+- 我在想：构建信息、TODO 清单经常直接暴露「哪里没做完」。
+- 验证：三条 TODO 正好是：map 没移出、debug 接口还在、token 没轮换。
+- 所以：这题的攻击面在「发布产物」，不在业务逻辑。
+
+**第 2 步：为什么先看 `app.min.js`**
+
+- 我在想：压缩代码里可能有硬编码常量。
+- 验证：发现 `atob("...")`，解码得到 `flag{DAILY_??I_?PLACE_000...}`。
+- 所以：这是**诱饵**（含 `PLACE_000` 占位符），不能直接交。
+
+**第 3 步：为什么转向 `.map`**
+
+- 我在想：`sourceMappingURL` 指向的 map 若可访问，`sourcesContent` 会带原始源码。
+- 验证：map 里直接有 `const LAUNCH_TOKEN = 'flag{...}'`。
+- 所以：真 token 在 map，压缩 js 里的是假的。
+
+**第 4 步：为什么用 `grep` 而不是肉眼**
+
+- 我在想：`l`/`1`/`I` 字形接近，手工抄写极易错。
+- 验证：`grep -o "LAUNCH_TOKEN = '[^']*'"` 精确提取。
+- 所以：token 零误差。
+
+**第 5 步：为什么请求要带 `X-Launch-Token`**
+
+- 我在想：debug 接口用这个头做鉴权。
+- 验证：`curl -H 'X-Launch-Token: ...' http://靶机/internal/debug` 返回 flag。
+
+### 载荷是怎么来的
+
+- **来源**：`grep` 从 map 提取，不手抄。
+- **为什么要单引号**：`{}` 在 shell 里有特殊含义，header 值用单引号包住。
+
+### 逐段解释
+
+| 动作 | 作用 |
+|---|---|
+| `grep -o "LAUNCH_TOKEN = '[^']*'"` | 只提取 token，不带周围代码 |
+| `curl -H 'X-Launch-Token: ...'` | 带上鉴权头请求内部接口 |
+| `/internal/debug` | 联调接口，正常应下线 |
+
+### 失败尝试与坑
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| 交了 base64 解码出的 flag | 是诱饵（`PLACE_000`） | 去 map 里找真 token |
+| curl 报 shell 语法错 | `{}` 被 shell 解释 | 用单引号包 header |
+| token 抄错一位 | 字形混淆 | 用 grep 自动提取 |
+
+### 自测
+
+**Q1**：source map 为什么会泄露源码？
+**A**：它的 `sourcesContent` 保存了构建前的原始源码，随产物一起发布就能被下载。
+
+**Q2**：怎么防止？
+**A**：构建关闭 sourcemap，或发布前删除 `.map`，CI 扫描产物。
+
+**Q3**：这题的三个真实漏洞是什么？
+**A**：map 泄露、debug 接口暴露、token 未轮换（正好对应 index.html 的三条 TODO）。
+
 ## 四、原理：Source Map 泄露
 
 前端构建时会把源码压缩、混淆，同时生成 `.map` 文件，记录「压缩代码 ↔ 原始代码」的对应关系，方便调试。

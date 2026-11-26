@@ -114,6 +114,82 @@ trig 4141414141414141414141414141414141414141414141414141414141414141
 FLAG=CTF2{...}
 ```
 
+## 六·五、复盘四问
+
+### 推理链（为什么这么做）
+
+**第 1 步：为什么先 `disasm`**
+
+- 我在想：要利用栈迁移，必须先知道 `buf` 相对 `rbp` 的偏移、保存 RBP 的位置、以及可用 gadget。
+- 验证：`disasm` 显示 `buf=rbp-0x20`、`strncat(buf, src, 0x20)`、`leave;ret`。
+- 所以：**写入 0x20 字节后，`strncat` 补的 NUL 正好落在 `[rbp]`** —— 单字节覆盖点确认。
+
+**第 2 步：为什么要 `leak`**
+
+- 我在想：NUL 只改最低字节，必须知道原 RBP 才能算出毒化后的地址。
+- 验证：`leak` 给出 `rbp=0x7ffd0210`。
+- 所以：`0x10 → 0x00`，毒化后 `rbp=0x7ffd0200`（页对齐）。
+
+**第 3 步：为什么迁移落点是 `0x7ffd0208` 而不是 `0x7ffd0200`**
+
+- 我在想：`leave` 语义是 `mov rsp,rbp; pop rbp`，`pop rbp` 会先吃掉 8 字节。
+- 验证：按 `leave;ret` 顺序推演。
+- 所以：ROP 链从 `0x7ffd0208` 开始，`0x7ffd0200` 那 8 字节是被 `pop` 掉的新 RBP。
+
+**第 4 步：为什么 `trig` 的 payload 必须正好 0x20 字节**
+
+- 我在想：NUL 落在第 0x21 个字节；短了 NUL 落在缓冲区内部，改不到保存的 RBP；长了会被 `strncat` 截断。
+- 验证：32 字节 `0x41`（64 个 hex 字符）触发成功。
+- 所以：**长度必须精确**，这是本题最容易失手的地方。
+
+**第 5 步：为什么排除 `win_alt`**
+
+- 我在想：`win_alt` 要求 `RSI=0xDEAD`。
+- 验证：gadget 列表里没有 `pop rsi`。
+- 所以：条件永远不满足 → 诱饵，选 `win`。
+
+**第 6 步：ROP 链为什么这么排**
+
+- 目标：`win(rdi="flag")`。
+- `0x7ffd0208: pop rdi; ret` → 下一条被弹进 RDI（`0x7ffd0300`，指向 "flag"）→ 再 `ret` 到 `win`。
+- 所以链为：`pop rdi;ret` → `"flag" 地址` → `win`。
+
+### 载荷是怎么来的
+
+- **来源**：手工推导 + 逐条 `seed`。
+- **`seed` 的值**：gadget 地址从 `disasm` 抄；字符串地址 `0x7ffd0300` 自己挑（迁移区内可控）；`"flag"` 用 `0x67616c66`（小端 `66 6c 61 67`）。
+- **`trig` 的 payload**：32 个 `0x41`，**不带 `0x` 前缀**（64 个 hex 字符）。
+
+### 逐段解释
+
+```
+seed 0x7ffd0208 0x401234   # 迁移后 ret 的第一个目标：pop rdi; ret
+seed 0x7ffd0210 0x7ffd0300 # 被 pop 进 RDI 的值：指向 "flag"
+seed 0x7ffd0218 0x4017a0   # pop rdi;ret 之后的 ret 目标：win()
+seed 0x7ffd0300 0x67616c66 # 写入 "flag\0"
+trig <32字节 0x41>          # 触发 fill，NUL 毒化 saved RBP
+```
+
+### 失败尝试与坑
+
+| 尝试 | 结果 | 原因 |
+|---|---|---|
+| `trig 0x4141...` | `bad hex` | `trig` 不认 `0x` 前缀，`seed` 才认 |
+| payload 写成 31 或 33 字节 | 迁移没发生 | NUL 落点不在 saved RBP |
+| ROP 链从 `0x7ffd0200` 开始 | `pop rbp` 吃掉了链头 | 必须从 `0x7ffd0208` 开始 |
+| 用 `win_alt` | 条件不满足 | 没有 `pop rsi` |
+
+### 自测
+
+**Q1**：为什么单字节 NUL 就能控制 RSP？
+**A**：`strncat` 把 NUL 写到 saved RBP 最低字节，`leave` 时 `mov rsp,rbp` 用的就是被改过的值。
+
+**Q2**：为什么 `trig` 的 payload 不能多也不能少？
+**A**：NUL 固定落在第 count+1 字节；只有 count=0x20 时它才落在 saved RBP 上。
+
+**Q3**：ROP 链从哪开始，为什么？
+**A**：`0x7ffd0208`；`0x7ffd0200` 的 8 字节会被 `pop rbp` 消耗。
+
 ## 七、原理
 
 1. **off-by-one NUL**：`strncat` 的边界计算错误，把结尾 `NUL` 写到了保存的 RBP 上。

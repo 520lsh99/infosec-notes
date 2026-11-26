@@ -63,6 +63,66 @@ echo "Can you find out the flag?";
 
 **flag 藏在注释里。**
 
+## 四·五、复盘四问
+
+### 推理链（为什么这么做）
+
+**第 1 步：为什么先点 `tips`**
+
+- 我在想：首页只有一个链接，参数怎么传要先确定。
+- 验证：URL 变成 `?file=tips`。
+- 所以：参数名是 `file`，存在文件包含。
+
+**第 2 步：为什么试 `?file=flag.php`**
+
+- 我在想：包含会执行 PHP，源码看不到，先确认文件是否存在。
+- 验证：页面只输出 `Can you find out the flag?`（没有报错）。
+- 所以：文件存在且被 include 执行了。
+
+**第 3 步：为什么改用 `php://filter`**
+
+- 我在想：`include` 是「执行」，我要的是「读取源码」。
+- 验证：`php://filter/read=convert.base64-encode/resource=flag.php` 返回 base64。
+- 所以：过滤器把文件当数据流读出（并把二进制安全地编码）。
+
+**第 4 步：为什么用 base64 而不是直接读**
+
+- **为什么**：PHP 文件里可能有非文本字节，base64 能无损传输。
+- **解码**：`echo '...' | base64 -d`。
+
+### 载荷是怎么来的
+
+- **来源**：文件包含题的标准套路。
+- **`convert.base64-encode`**：把内容编码成 base64 再输出。
+- **`resource=flag.php`**：目标文件。
+
+### 逐段解释
+
+| 片段 | 作用 |
+|---|---|
+| `php://filter` | 流包装器，提供过滤能力 |
+| `read=convert.base64-encode` | 读的时候先 base64 编码 |
+| `resource=flag.php` | 实际要读的文件 |
+| `\| base64 -d` | 本地解码 |
+
+### 失败尝试与坑
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| 只有 `Can you find out the flag?` | 这是执行结果，不是失败 | 上 filter 读源码 |
+| 解码失败 | 复制时漏了末尾 `=` | 完整复制 base64 |
+
+### 自测
+
+**Q1**：`include 'flag.php'` 为什么看不到源码？
+**A**：PHP 会执行它，只输出执行结果，不输出源码文本。
+
+**Q2**：`php://filter` 的关键参数？
+**A**：`read=convert.base64-encode` + `resource=目标文件`。
+
+**Q3**：修复的核心？
+**A**：不动态包含用户输入，用固定映射表。
+
 ## 五、原理
 
 | 点 | 说明 |
